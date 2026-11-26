@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Nachtbot">
+<title>Nachtbot</title>
+<style>
+/* Layout: one column, summary first, then positions, agents, log. */
+:root{--bg:#f4f6f8;--card:#fff;--fg:#121619;--mute:#667085;--line:#e3e7ec;--acc:#2f6fed;--up:#12925a;--down:#d63c3c;--warn:#b26a00;--warnbg:#fff3dc;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#0c0f13;--card:#151a21;--fg:#e8ebef;--mute:#8d97a6;--line:#232a34;--acc:#6b9bff;--up:#35c483;--down:#ff6b6b;--warn:#ffb648;--warnbg:#3a2a0e;color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 -apple-system,system-ui,sans-serif;-webkit-text-size-adjust:100%}
+main{max-width:720px;margin:0 auto;padding-top:max(12px,env(safe-area-inset-top));padding-bottom:max(24px,env(safe-area-inset-bottom));padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right));display:grid;gap:12px}
+header{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+h1{font-size:22px;margin:0}
+.badge{padding:3px 10px;border-radius:99px;background:var(--warnbg);color:var(--warn);font-weight:700;font-size:12px}
+.sub{color:var(--mute);font-size:13px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;min-width:0}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.k{color:var(--mute);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+.v{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}
+.up{color:var(--up)}.down{color:var(--down)}
+.btns{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+button{font:inherit;font-weight:600;border:0;border-radius:12px;padding:14px 10px;background:var(--acc);color:#fff;min-height:48px}
+button.alt{background:var(--line);color:var(--fg)}button.stop{background:var(--down)}
+button:focus-visible{outline:3px solid var(--fg);outline-offset:2px}
+button:disabled{opacity:.45}
+svg{width:100%;height:120px;display:block}
+table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
+td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--mute);font-weight:500;font-size:12px}
+a{color:var(--acc)}
+#log{font:12px/1.5 ui-monospace,Menlo,monospace;max-height:50vh;overflow:auto;word-break:break-word}
+#log div{padding:2px 0;border-bottom:1px dashed var(--line)}
+.ENTER{color:var(--acc)}.EXIT{color:var(--up)}.FILTERED{color:var(--mute)}.PAUSE,.RECAP,.ERROR{color:var(--warn);font-weight:600}
+.hint{background:var(--warnbg);color:var(--warn);border-radius:12px;padding:10px 12px;font-size:13px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--mute);margin-right:6px}.dot.on{background:var(--up);animation:p 1.6s infinite}
+@keyframes p{50%{opacity:.35}}@media (prefers-reduced-motion:reduce){.dot.on{animation:none}}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>Nachtbot</h1><div class="sub" id="status"><span class="dot"></span>gestoppt</div></div>
+    <span class="badge">PAPER · kein echtes Geld</span>
+  </header>
+
+  <div class="btns">
+    <button id="now">Jetzt starten (8h)</button>
+    <button id="night" class="alt">Heute Nacht 23–07</button>
+    <button id="stop" class="stop" disabled>Stopp</button>
+    <button id="reset" class="alt">Zurücksetzen ($70)</button>
+  </div>
+  <div class="hint">Für die Nacht: iPhone ans Ladekabel, diese Seite offen lassen, Einstellungen → Anzeige &amp; Helligkeit → Automatische Sperre → Nie.</div>
+
+  <div class="tiles">
+    <div class="card"><div class="k">Kontostand</div><div class="v" id="eq">$70.00</div></div>
+    <div class="card"><div class="k">Gewinn</div><div class="v" id="pnl">$0.00</div></div>
+    <div class="card"><div class="k">Trades</div><div class="v" id="tr">0</div></div>
+    <div class="card"><div class="k">Gewonnen / Verloren</div><div class="v" id="wl">0 / 0</div></div>
+  </div>
+
+  <div class="card"><div class="k">Kontoverlauf</div><svg id="curve" viewBox="0 0 100 100" preserveAspectRatio="none"></svg></div>
+  <div id="recap"></div>
+  <div class="card"><div class="k">Offene Positionen</div><table id="pos"></table></div>
+  <div class="card"><div class="k">Agenten</div><table id="ag"></table></div>
+  <div class="card"><div class="k">Nacht-Log</div><div id="log"></div></div>
+</main>
+
+<script type="module">
+import { CONFIG } from './bot/config.js';
+import { Engine } from './bot/engine.js';
+
+const KEY = 'nachtbot-v1';
+const $ = (id) => document.getElementById(id);
+const usd = (n) => (n < 0 ? '-$' : '$') + Math.abs(Number(n)).toFixed(2);
+const load = () => { try { return JSON.parse(localStorage.getItem(KEY)); } catch { return null; } };
+const save = (o) => { try { localStorage.setItem(KEY, JSON.stringify(o)); } catch { /* full or blocked */ } };
+
+let engine, session = null, timers = [], wake = null;
+
+function makeEngine(saved) {
+  const e = new Engine({ onPersist: (state, prices) => save({ state, prices, session }) });
+  if (saved?.state) { Object.assign(e.state, saved.state); Object.assign(e.prices, saved.prices || {}); }
+  return e;
+}
+
+async function keepAwake() {
+  try { if (!wake && navigator.wakeLock) { wake = await navigator.wakeLock.request('screen'); wake.addEventListener('release', () => { wake = null; }); } } catch { /* not allowed */ }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && session) keepAwake(); });
+
+function nextAt(hh, mm, from = new Date()) {
+  const d = new Date(from); d.setHours(hh, mm, 0, 0);
+  if (d <= from) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+function run() {
+  timers.forEach(clearInterval); timers = [];
+  let busy = false;
+  const guard = (fn) => async () => {
+    if (!session || engine.state.finished) return;
+    const t = Date.now();
+    if (t < session.start) return;
+    if (t >= session.end) { engine.finish(); stopTimers(); render(); return; }
+    try { await fn(); } catch (err) { engine.log('ERROR', err.message); }
+    render();
+  };
+  const scan = guard(async () => { if (busy) return; busy = true; try { await engine.scan(); } finally { busy = false; } });
+  timers.push(setInterval(scan, CONFIG.intervals.scanMs));
+  timers.push(setInterval(guard(() => engine.tick()), CONFIG.intervals.positionMs));
+  timers.push(setInterval(render, 5000));
+  keepAwake();
+  scan();
+}
+function stopTimers() { timers.forEach(clearInterval); timers = []; session = null; engine.persist(); try { wake?.release(); } catch {} }
+
+function start(s, e) {
+  engine = makeEngine(null);
+  session = { start: s.getTime(), end: e.getTime() };
+  engine.state.session = { start: s.toLocaleString('de-DE'), end: e.toLocaleString('de-DE') };
+  engine.log('INFO', 'Universum: frische DEX-Paare · Liq ≥ $40k · Holder ≥ 300 · 6 Agenten online · Rug-Check aktiv');
+  run(); render();
+}
+
+$('now').onclick = () => start(new Date(), new Date(Date.now() + 8 * 3600e3));
+$('night').onclick = () => { const e = nextAt(7, 0); const s = nextAt(23, 0, new Date(e - 24 * 3600e3)); start(s < new Date() ? new Date() : s, e); };
+$('stop').onclick = () => { if (!engine.state.finished) engine.finish(); stopTimers(); render(); };
+$('reset').onclick = () => { if (session) return; engine = makeEngine(null); save({ state: engine.state, prices: {}, session: null }); render(); };
+
+function row(cells) { const tr = document.createElement('tr'); cells.forEach((c) => { const td = document.createElement('td'); if (c instanceof Node) td.append(c); else td.textContent = c; tr.append(td); }); return tr; }
+
+function render() {
+  const s = engine.state, eq = engine.equity(), pnl = eq - s.startBalance, w = s.closed.filter((c) => c.pnl > 0).length;
+  const live = !!session && !s.finished, waiting = live && Date.now() < session.start;
+  $('status').innerHTML = '';
+  const dot = document.createElement('span'); dot.className = 'dot' + (live ? ' on' : '');
+  $('status').append(dot, live ? (waiting ? 'wartet bis ' + new Date(session.start).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : 'läuft bis ' + new Date(session.end).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })) + (s.paused ? ' · PAUSIERT' : '') : 'gestoppt');
+  ['now', 'night', 'reset'].forEach((id) => { $(id).disabled = live; }); $('stop').disabled = !live;
+
+  $('eq').textContent = usd(eq);
+  $('pnl').textContent = (pnl >= 0 ? '+' : '') + usd(pnl) + ' (' + (pnl / s.startBalance * 100).toFixed(1) + '%)';
+  $('pnl').className = 'v ' + (pnl >= 0 ? 'up' : 'down');
+  $('tr').textContent = s.closed.length; $('wl').textContent = w + ' / ' + (s.closed.length - w);
+
+  const c = s.curve.length > 1 ? s.curve : [...s.curve, ...s.curve];
+  const mn = Math.min(...c.map((p) => p.eq)), mx = Math.max(...c.map((p) => p.eq)), r = (mx - mn) || 1;
+  const pts = c.map((p, i) => (i / (c.length - 1) * 100).toFixed(2) + ',' + (92 - (p.eq - mn) / r * 84).toFixed(2)).join(' ');
+  $('curve').innerHTML = `<polyline fill="none" stroke="var(--acc)" stroke-width="2" vector-effect="non-scaling-stroke" points="${pts}"/>`;
+
+  const pos = $('pos'); pos.replaceChildren(row(['Coin', 'Einstieg', 'Jetzt', 'x']));
+  pos.firstChild.querySelectorAll('td').forEach((td) => { td.outerHTML = '<th>' + td.textContent + '</th>'; });
+  const open = Object.values(s.positions);
+  if (!open.length) pos.append(row(['keine', '', '', '']));
+  for (const p of open) {
+    const now = engine.prices[p.mint] || p.entry, x = now / p.entry, a = document.createElement('a');
+    a.textContent = p.symbol; if (/^https:\/\//.test(p.url || '')) { a.href = p.url; a.target = '_blank'; a.rel = 'noopener'; }
+    const tr = row([a, p.entry.toPrecision(4), now.toPrecision(4), x.toFixed(2) + 'x']); tr.lastChild.className = x >= 1 ? 'up' : 'down'; pos.append(tr);
+  }
+
+  $('ag').replaceChildren(...Object.entries(s.agents).map(([k, v]) => { const b = document.createElement('b'); b.textContent = k; return row([b, v]); }));
+  $('log').replaceChildren(...s.log.slice(-300).reverse().map((l) => { const d = document.createElement('div'); d.className = l.kind; d.textContent = new Date(l.t).toLocaleTimeString('de-DE') + ' ' + l.kind + ' ' + l.msg; return d; }));
+
+  const R = s.recap, rc = $('recap'); rc.replaceChildren();
+  if (R) {
+    const d = document.createElement('div'); d.className = 'card';
+    d.innerHTML = '<div class="k">Zusammenfassung</div>';
+    const t = document.createElement('div');
+    t.textContent = `Start ${usd(R.start)} → Ende ${usd(R.end)} (${R.pnlPct}%) · ${R.totalTrades} Trades, ${R.wins} gewonnen. ` +
+      `Bester: ${R.best ? R.best.symbol + ' ' + usd(R.best.pnl) : '–'} · Schlechtester: ${R.worst ? R.worst.symbol + ' ' + usd(R.worst.pnl) : '–'} · ` +
+      `Top 3: ${R.top3.map((x) => x.symbol + ' ' + usd(x.pnl)).join(', ') || '–'}`;
+    d.append(t); rc.append(d);
+  }
+}
+
+// Restore after reload: resume an unfinished session.
+const saved = load();
+engine = makeEngine(saved);
+if (saved?.session && !engine.state.finished && Date.now() < saved.session.end) { session = saved.session; engine.log('INFO', 'Seite neu geladen, Session läuft weiter'); run(); }
+render();
+</script>
+</body>
+</html>
